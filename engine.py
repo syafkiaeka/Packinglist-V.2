@@ -1,15 +1,16 @@
-# engine.py - BANGOR PACKING LIST ENGINE (FINAL -支持 ID/EN labels)
+# engine.py - BANGOR PACKING LIST ENGINE (FINAL - Detail DO/Gabungan + NO KOLI kosong)
 from collections import OrderedDict
 from openpyxl import load_workbook, Workbook
 from openpyxl.styles import Font, Alignment, Border, Side
 import datetime
 
-ENGINE_VERSION = "ENGINE-FINAL-ID-EN-01"
+ENGINE_VERSION = "ENGINE-FINAL-DETAILDO-02"
 
 JUNK = ("PT BANGOR", "DELIVERY ORDER DETAIL", "RINCIAN PEMINDAHAN",
         "RINCIAN PENGIRIMAN PESANAN", "ACCURATE ACCOUNTING", "PRINTED ON",
         "PAGE BREAK", "FROM ", "DARI ", "BRANCH :", "CABANG", "GUDANG ASAL",
-        "FILTERED BY", "ITEM NAME", "NAMA BARANG", "TOTAL", "OF 34")
+        "FILTERED BY", "ITEM NAME", "NAMA BARANG", "TOTAL", "OF 34",
+        "DETAIL DO", "KODE #", "CODE#")
 
 
 class PackingListEngine:
@@ -73,7 +74,6 @@ class PackingListEngine:
         return any(t.startswith(j) or t == j for j in JUNK)
 
     def label_value(self, ws, row, label, maxc):
-        """Cari sel berlabel `label`, ambil nilai pertama di sebelah kanannya."""
         for c in range(1, maxc + 1):
             if self.Norm(ws.cell(row, c).value) == label:
                 for c2 in range(c + 1, maxc + 1):
@@ -119,14 +119,17 @@ class PackingListEngine:
     def detect_format(self):
         sheets = self.wb.sheetnames
         it = next((s for s in sheets if "Rincian" in s and "Pemindahan" in s), None)
-        gab = next((s for s in sheets if "Gabungan" in s), None)
-        dod = next((s for s in sheets if "Delivery Order" in s or "Pengiriman" in s), None)
+        dod = next((s for s in sheets if "Delivery Order" in s), None)
+        gab = next((s for s in sheets if "Gabungan" in s or "Detail" in s), None)
+        peng = next((s for s in sheets if "Pengiriman" in s), None)
         if it:
             self.format_type, self.target_sheet = "Rincian", it
-        elif gab:
-            self.format_type, self.target_sheet = "Gabungan", gab
         elif dod:
             self.format_type, self.target_sheet = "Blok", dod
+        elif gab:
+            self.format_type, self.target_sheet = "Gabungan", gab
+        elif peng:
+            self.format_type, self.target_sheet = "Blok", peng
         else:
             raise Exception(f"Format tidak dikenali. Sheet: {sheets}")
         self.log(f"📄 Format: {self.format_type} | Sheet: '{self.target_sheet}'")
@@ -180,13 +183,12 @@ class PackingListEngine:
         self.stats["it_count"] = len(self.DOGroups)
         self.log(f"✅ IT terbaca: {len(self.DOGroups)} dokumen")
 
-    # ---------- Gabungan & Delivery Order Detail (label ID + EN) ----------
+    # ---------- Gabungan / Detail DO / Delivery Order Detail ----------
     def parse_blok(self):
         ws = self.wb[self.target_sheet]
         maxr, maxc = ws.max_row or 1, ws.max_column or 20
         is_gab = (self.format_type == "Gabungan")
 
-        # 1) Baris awal blok: "Number" (EN) atau "Nomor #" (ID)
         starts = []
         for r in range(1, maxr + 1):
             for c in range(1, maxc + 1):
@@ -204,12 +206,9 @@ class PackingListEngine:
                     self.Raw(self.label_value(ws, r, "NOMOR", maxc))
             if not nomor:
                 continue
-
-            # 2) Outlet: "Customer" (EN) atau "Pelanggan" (ID)
             outlet = self.Raw(self.label_value(ws, r, "CUSTOMER", maxc)) or \
                      self.Raw(self.label_value(ws, r, "PELANGGAN", maxc))
 
-            # 3) Tanggal: "Date" (EN) atau "Tanggal" (ID) — ambil dari label, BUKAN pattern
             tanggal = None
             for tr in range(r, min(r + 5, end)):
                 tanggal = self.label_value(ws, tr, "DATE", maxc)
@@ -227,7 +226,6 @@ class PackingListEngine:
                 if tanggal and not self.DOGroups[nomor]["Tanggal"]:
                     self.DOGroups[nomor]["Tanggal"] = tanggal
 
-            # 4) Header item: "Code#" (EN) atau "Kode #" (ID)
             hr = self.find_label_row(ws, r, min(r + 10, end), ("CODE", "KODE"), maxc)
             if hr is None:
                 continue
@@ -245,7 +243,6 @@ class PackingListEngine:
             if cc is None or nc is None or qc is None:
                 continue
 
-            # 5) Baca item
             cnt = 0
             bbt = 0
             for ir in range(hr + 1, end):
@@ -409,12 +406,13 @@ class PackingListEngine:
                 cell.border = bm
             ws.row_dimensions[9].height = 25
             r = 10
-            for no_koli, it in enumerate(d["Items"], 1):
-                ws.cell(r, 1, no_koli)                      # NO KOLI terisi
+            for it in d["Items"]:
+                # kolom 1 (NO KOLI) sengaja dibiarkan KOSONG
                 ws.cell(r, 2, it["NamaBarang"])
                 ws.cell(r, 3, it["Qty"])
                 ws.cell(r, 4, it["Unit"])
-                ws.cell(r, 5, it.get("Notes", ""))          # NOTES (BBT)
+                if it.get("Notes"):
+                    ws.cell(r, 5, it["Notes"])
                 for c in range(1, 6):
                     cell = ws.cell(r, c)
                     cell.border = bt
