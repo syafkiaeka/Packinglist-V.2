@@ -1,8 +1,15 @@
-ENGINE_VERSION = "FINAL-BBT-DATE-v1"
-
+# engine.py - BANGOR PACKING LIST ENGINE (FINAL -支持 ID/EN labels)
 from collections import OrderedDict
 from openpyxl import load_workbook, Workbook
 from openpyxl.styles import Font, Alignment, Border, Side
+import datetime
+
+ENGINE_VERSION = "ENGINE-FINAL-ID-EN-01"
+
+JUNK = ("PT BANGOR", "DELIVERY ORDER DETAIL", "RINCIAN PEMINDAHAN",
+        "RINCIAN PENGIRIMAN PESANAN", "ACCURATE ACCOUNTING", "PRINTED ON",
+        "PAGE BREAK", "FROM ", "DARI ", "BRANCH :", "CABANG", "GUDANG ASAL",
+        "FILTERED BY", "ITEM NAME", "NAMA BARANG", "TOTAL", "OF 34")
 
 
 class PackingListEngine:
@@ -32,6 +39,12 @@ class PackingListEngine:
     def Raw(self, v):
         return "" if v is None else str(v).strip()
 
+    def Norm(self, v):
+        t = self.Txt(v)
+        for ch in [" ", ".", "_", "-", "/", "\\", "#", ":", "?"]:
+            t = t.replace(ch, "")
+        return t
+
     def Num(self, v):
         try:
             if v is None or v == "":
@@ -55,29 +68,54 @@ class PackingListEngine:
             return "PACK"
         return u
 
-    # ---------- Master Data ----------
+    def is_junk(self, nama):
+        t = self.Txt(nama)
+        return any(t.startswith(j) or t == j for j in JUNK)
+
+    def label_value(self, ws, row, label, maxc):
+        """Cari sel berlabel `label`, ambil nilai pertama di sebelah kanannya."""
+        for c in range(1, maxc + 1):
+            if self.Norm(ws.cell(row, c).value) == label:
+                for c2 in range(c + 1, maxc + 1):
+                    v = ws.cell(row, c2).value
+                    if v is None:
+                        continue
+                    t = self.Raw(v)
+                    if not t or t == ":":
+                        continue
+                    if self.Norm(t) == label:
+                        continue
+                    return v
+        return None
+
+    def find_label_row(self, ws, start, end, labels, maxc):
+        for r in range(start, end):
+            for c in range(1, maxc + 1):
+                if self.Norm(ws.cell(r, c).value) in labels:
+                    return r
+        return None
+
     def load_master_data(self):
         if self.MasterData:
-            self.log(f"📚 Master dari DB: {len(self.MasterData)} item")
+            self.log(f"📚 Master Data dari database: {len(self.MasterData)} item")
             return
         sh = next((s for s in self.wb.sheetnames if "Master" in s), None)
         if not sh:
-            self.log("⚠️ Tidak ada Master Data.")
+            self.log("⚠️ Master Data kosong (DB & sheet tidak ada).")
             return
         ws = self.wb[sh]
-        for r in range(6, (ws.max_row or 200) + 1):
-            nm = self.Txt(ws.cell(r, 2).value)
-            if not nm or nm in self.MasterData:
+        for r in range(6, (ws.max_row or 300) + 1):
+            nama = self.Txt(ws.cell(r, 2).value)
+            if not nama or nama in self.MasterData:
                 continue
-            self.MasterData[nm] = {
-                "Nama": nm,
+            self.MasterData[nama] = {
+                "Nama": nama,
                 "QtyMax": self.Num(ws.cell(r, 3).value),
                 "Unit": self.Txt(ws.cell(r, 5).value),
                 "Kategori": self.Txt(ws.cell(r, 6).value),
             }
-        self.log(f"📚 Master dari sheet: {len(self.MasterData)} item")
+        self.log(f"📚 Master Data dari sheet: {len(self.MasterData)} item")
 
-    # ---------- Detect ----------
     def detect_format(self):
         sheets = self.wb.sheetnames
         it = next((s for s in sheets if "Rincian" in s and "Pemindahan" in s), None)
@@ -90,24 +128,29 @@ class PackingListEngine:
         elif dod:
             self.format_type, self.target_sheet = "Blok", dod
         else:
-            raise Exception(f"Format tidak dikenali: {sheets}")
-        self.log(f"📄 Format={self.format_type} Sheet='{self.target_sheet}'")
+            raise Exception(f"Format tidak dikenali. Sheet: {sheets}")
+        self.log(f"📄 Format: {self.format_type} | Sheet: '{self.target_sheet}'")
 
-    # ---------- IT ----------
+    # ---------- IT: Rincian Pemindahan Barang ----------
     def parse_rincian(self):
         ws = self.wb[self.target_sheet]
-        keys = {"DO": ["NOPEMINDAHAN", "NOMORPEMINDAHAN", "NOTRANSAKSI"],
-                "TGL": ["TANGGAL", "DATE", "TGL"],
-                "TUJUAN": ["GUDANGTUJUANDARI", "GUDANGTUJUAN"],
-                "GUDANG": ["GUDANG"],
-                "NAMA": ["NAMABARANG", "NAMAITEM"],
-                "UNIT": ["SATUAN", "UNIT"],
-                "QTY": ["KUANTITAS", "QUANTITY", "JUMLAH"]}
+        maxr, maxc = ws.max_row or 1, ws.max_column or 12
+        keys = {
+            "DO": ["NOPEMINDAHAN", "NOMORPEMINDAHAN", "NOTRANSAKSI"],
+            "TGL": ["TANGGAL", "DATE", "TGL"],
+            "TUJUAN": ["GUDANGTUJUANDARI", "GUDANGTUJUAN"],
+            "GUDANG": ["GUDANG"],
+            "NAMA": ["NAMABARANG", "NAMAITEM"],
+            "UNIT": ["SATUAN", "UNIT"],
+            "QTY": ["KUANTITAS", "QUANTITY", "JUMLAH"],
+        }
         hrow, cmap = None, {}
-        for r in range(1, min(ws.max_row or 30, 30) + 1):
+        for r in range(1, min(maxr, 30) + 1):
             cand = {}
-            for c in range(1, (ws.max_column or 12) + 1):
-                n = self.NormH(ws.cell(r, c).value)
+            for c in range(1, maxc + 1):
+                n = self.Norm(ws.cell(r, c).value)
+                if not n:
+                    continue
                 for f, kws in keys.items():
                     if n in kws:
                         cand[f] = c
@@ -115,63 +158,63 @@ class PackingListEngine:
                 hrow, cmap = r, cand
                 break
         if not hrow:
-            raise Exception("Header IT tidak ditemukan.")
+            raise Exception("Header sheet IT tidak ditemukan.")
         out_col = cmap.get("TUJUAN") or cmap.get("GUDANG")
-        ld = lt = lo = None
-        for r in range(hrow + 1, (ws.max_row or 100) + 1):
+        last_do = last_tgl = last_out = None
+        for r in range(hrow + 1, maxr + 1):
             def g(f):
                 return ws.cell(r, cmap[f]).value if f in cmap else None
-            do = self.Raw(g("DO")) or ld
-            tgl = g("TGL") if g("TGL") is not None else lt
-            out = (self.Raw(ws.cell(r, out_col).value) if out_col else "") or lo
-            nm = self.Raw(g("NAMA"))
-            q = self.Num(g("QTY"))
-            if not do or not nm or q <= 0:
+            do = self.Raw(g("DO")) or last_do
+            tgl = g("TGL") if g("TGL") is not None else last_tgl
+            out = (self.Raw(ws.cell(r, out_col).value) if out_col else "") or last_out
+            nama = self.Raw(g("NAMA"))
+            qty = self.Num(g("QTY"))
+            if not do or not nama or qty <= 0 or self.is_junk(nama):
                 continue
-            ld, lt, lo = do, tgl, out
+            last_do, last_tgl, last_out = do, tgl, out
             if do not in self.DOGroups:
                 self.DOGroups[do] = {"Outlet": out, "Tanggal": tgl, "ShipVia": "", "Items": []}
-            self.DOGroups[do]["Items"].append(
-                {"Nama": nm, "Qty": q, "Unit": self.NormUnit(self.Raw(g("UNIT"))), "Notes": ""})
+            self.DOGroups[do]["Items"].append({
+                "Nama": nama, "Qty": qty,
+                "Unit": self.NormUnit(self.Raw(g("UNIT"))), "Notes": ""})
         self.stats["it_count"] = len(self.DOGroups)
-        self.log(f"✅ IT: {len(self.DOGroups)} dokumen")
+        self.log(f"✅ IT terbaca: {len(self.DOGroups)} dokumen")
 
-    def NormH(self, v):
-        t = self.Txt(v)
-        for ch in [" ", ".", "_", "-", "/", "\\", "#", ":", "?"]:
-            t = t.replace(ch, "")
-        return t
-
-    # ---------- Gabungan & DOD (unified) ----------
+    # ---------- Gabungan & Delivery Order Detail (label ID + EN) ----------
     def parse_blok(self):
         ws = self.wb[self.target_sheet]
         maxr, maxc = ws.max_row or 1, ws.max_column or 20
         is_gab = (self.format_type == "Gabungan")
 
+        # 1) Baris awal blok: "Number" (EN) atau "Nomor #" (ID)
         starts = []
         for r in range(1, maxr + 1):
             for c in range(1, maxc + 1):
-                if self.NormH(ws.cell(r, c).value) == "NUMBER":
+                if self.Norm(ws.cell(r, c).value) in ("NUMBER", "NOMOR"):
                     starts.append(r)
                     break
         if not starts:
-            raise Exception("Label 'Number' tidak ditemukan.")
-        self.log(f"🔎 {len(starts)} blok DO")
+            raise Exception(f"Label 'Number/Nomor #' tidak ditemukan di '{self.target_sheet}'")
+        self.log(f"🔎 Ditemukan {len(starts)} blok DO")
 
         for i, r in enumerate(starts):
             end = starts[i + 1] if i + 1 < len(starts) else maxr + 1
 
-            nomor = self.Raw(self._label_value(ws, r, "NUMBER", maxc))
+            nomor = self.Raw(self.label_value(ws, r, "NUMBER", maxc)) or \
+                    self.Raw(self.label_value(ws, r, "NOMOR", maxc))
             if not nomor:
                 continue
-            outlet = self.Raw(self._label_value(ws, r, "CUSTOMER", maxc))
 
-            # TANGGAL: cari baris berlabel DATE, ambil nilai kanannya
+            # 2) Outlet: "Customer" (EN) atau "Pelanggan" (ID)
+            outlet = self.Raw(self.label_value(ws, r, "CUSTOMER", maxc)) or \
+                     self.Raw(self.label_value(ws, r, "PELANGGAN", maxc))
+
+            # 3) Tanggal: "Date" (EN) atau "Tanggal" (ID) — ambil dari label, BUKAN pattern
             tanggal = None
             for tr in range(r, min(r + 5, end)):
-                tanggal = self._label_value(ws, tr, "DATE", maxc)
+                tanggal = self.label_value(ws, tr, "DATE", maxc)
                 if tanggal is None:
-                    tanggal = self._label_value(ws, tr, "TANGGAL", maxc)
+                    tanggal = self.label_value(ws, tr, "TANGGAL", maxc)
                 if tanggal is not None:
                     break
 
@@ -184,24 +227,16 @@ class PackingListEngine:
                 if tanggal and not self.DOGroups[nomor]["Tanggal"]:
                     self.DOGroups[nomor]["Tanggal"] = tanggal
 
-            # header Code#
-            hr = None
-            for tr in range(r, min(r + 10, end)):
-                for c in range(1, maxc + 1):
-                    if self.NormH(ws.cell(tr, c).value) == "CODE":
-                        hr = tr
-                        break
-                if hr:
-                    break
+            # 4) Header item: "Code#" (EN) atau "Kode #" (ID)
+            hr = self.find_label_row(ws, r, min(r + 10, end), ("CODE", "KODE"), maxc)
             if hr is None:
                 continue
-
             cc = nc = qc = uc = None
             for c in range(1, maxc + 1):
-                n = self.NormH(ws.cell(hr, c).value)
-                if n == "CODE" and cc is None:
+                n = self.Norm(ws.cell(hr, c).value)
+                if n in ("CODE", "KODE") and cc is None:
                     cc = c
-                elif n in ("ITEMNAME", "NAMABARANG") and nc is None:
+                elif n in ("ITEMNAME", "NAMABARANG", "NAMAITEM") and nc is None:
                     nc = c
                 elif n in ("QUANTITY", "KUANTITAS", "QTY", "JUMLAH") and qc is None:
                     qc = c
@@ -210,17 +245,17 @@ class PackingListEngine:
             if cc is None or nc is None or qc is None:
                 continue
 
-            cnt = bbt = 0
+            # 5) Baca item
+            cnt = 0
+            bbt = 0
             for ir in range(hr + 1, end):
                 code = self.Raw(ws.cell(ir, cc).value)
-                nm = self.Raw(ws.cell(ir, nc).value)
-                q = self.Num(ws.cell(ir, qc).value)
-                u = self.Raw(ws.cell(ir, uc).value) if uc else ""
-                if not nm or q <= 0:
+                nama = self.Raw(ws.cell(ir, nc).value)
+                qty = self.Num(ws.cell(ir, qc).value)
+                unit = self.Raw(ws.cell(ir, uc).value) if uc else ""
+                if not nama or qty <= 0 or self.is_junk(nama):
                     continue
-                if self.NormH(code) == "CODE":
-                    continue
-                if nm.upper() in ("ITEM NAME", "NAMA BARANG", "TOTAL"):
+                if self.Norm(code) in ("CODE", "KODE"):
                     continue
 
                 notes = ""
@@ -230,8 +265,9 @@ class PackingListEngine:
                         notes = "BBT"
                         bbt += 1
 
-                self.DOGroups[nomor]["Items"].append(
-                    {"Nama": nm, "Qty": q, "Unit": self.NormUnit(u), "Notes": notes})
+                self.DOGroups[nomor]["Items"].append({
+                    "Nama": nama, "Qty": qty,
+                    "Unit": self.NormUnit(unit), "Notes": notes})
                 cnt += 1
 
             self.log(f"   📦 {nomor} | {cnt} item ({bbt} BBT) | {outlet} | Tgl: {tanggal or 'KOSONG'}")
@@ -239,32 +275,17 @@ class PackingListEngine:
         self.stats["do_count"] = len(self.DOGroups)
         self.log(f"✅ Total DO: {len(self.DOGroups)}")
 
-    def _label_value(self, ws, row, label, maxc):
-        for c in range(1, maxc + 1):
-            if self.NormH(ws.cell(row, c).value) == label:
-                for c2 in range(c + 1, maxc + 1):
-                    v = ws.cell(row, c2).value
-                    if v is None:
-                        continue
-                    t = self.Raw(v)
-                    if not t or t == ":":
-                        continue
-                    if self.NormH(t) == label:
-                        continue
-                    return v
-        return None
-
-    # ---------- Transform ----------
+    # ---------- transform ----------
     def rank_kategori(self, kat, receh):
         k = self.Txt(kat)
         if k in ("HAMPERS", "GRILL BOX", "INNER", "CRAZY BUCKET", "MINYAK", "PACKAGING"):
             k = "LAIN-LAIN"
-        tbl = {"DAGING": ("Daging", 1), "FROZEN": ("Frozen", 3), "KEJU": ("Keju", 5),
-               "KENTANG": ("Kentang", 7), "SAUS": ("Saus", 9), "BUTTER": ("Butter", 11),
-               "DRY": ("Dry", 12), "LAIN-LAIN": ("Lain-lain", 14),
-               "BUN": ("Bun", 16), "ROTI": ("Bun", 16)}
-        if k in tbl:
-            nm, rk = tbl[k]
+        table = {"DAGING": ("Daging", 1), "FROZEN": ("Frozen", 3), "KEJU": ("Keju", 5),
+                 "KENTANG": ("Kentang", 7), "SAUS": ("Saus", 9), "BUTTER": ("Butter", 11),
+                 "DRY": ("Dry", 12), "LAIN-LAIN": ("Lain-lain", 14),
+                 "BUN": ("Bun", 16), "ROTI": ("Bun", 16)}
+        if k in table:
+            nm, rk = table[k]
             if k in ("BUTTER", "BUN", "ROTI"):
                 return nm, rk
             return (nm + " Receh", rk + 1) if receh else (nm, rk)
@@ -275,12 +296,12 @@ class PackingListEngine:
         for do_no, d in self.DOGroups.items():
             hasil = []
             for it in d["Items"]:
-                nm = self.Raw(it["Nama"])
-                key = self.Txt(nm)
+                nama = self.Raw(it["Nama"])
+                key = self.Txt(nama)
                 notes = it.get("Notes", "")
                 m = self.MasterData.get(key)
                 if not m:
-                    missing.add(nm)
+                    missing.add(nama)
                     continue
                 if "DUS" in key:
                     continue
@@ -317,23 +338,24 @@ class PackingListEngine:
                 while real > 0.0001:
                     koli = min(real, kmax)
                     receh = koli < (kmax - 0.0001)
-                    ok, rk = self.rank_kategori(kat, receh)
-                    hasil.append({"NamaBarang": nm, "Qty": koli, "Unit": uo,
-                                  "Kategori": ok, "Rank": rk, "Notes": notes})
+                    okat, rk = self.rank_kategori(kat, receh)
+                    hasil.append({"NamaBarang": nama, "Qty": koli, "Unit": uo,
+                                  "Kategori": okat, "Rank": rk, "Notes": notes})
                     real -= koli
                     self.stats["item_count"] += 1
             hasil.sort(key=lambda x: (x["Rank"], x["NamaBarang"].upper()))
             self.TransformResult[do_no] = {"Outlet": d["Outlet"], "Tanggal": d["Tanggal"],
                                            "ShipVia": d["ShipVia"], "Items": hasil}
         if missing:
-            self.log(f"⚠️ {len(missing)} item tidak di Master: " + ", ".join(sorted(missing)[:6]))
+            self.log(f"⚠️ {len(missing)} item tidak ada di Master: "
+                     + ", ".join(sorted(missing)[:6]))
         self.log(f"✅ Transform: {len(self.TransformResult)} DO / {self.stats['item_count']} baris")
 
     def group_receh(self):
         for k, v in self.TransformResult.items():
             self.FinalResult[k] = v
 
-    # ---------- Export ----------
+    # ---------- export ----------
     def export(self):
         wb = self.master_wb if self.master_wb is not None else Workbook()
         if self.master_wb is None:
@@ -368,12 +390,15 @@ class PackingListEngine:
             ws["A5"] = "OUTLET :"
             ws["B5"] = d["Outlet"]
             ws["A6"] = "DELIVERY\nDATE :"
-            ws["B6"] = d.get("Tanggal", "")
-            for row in range(4, 7):
-                ws.cell(row, 1).font = Font(bold=True, size=12)
-                ws.cell(row, 1).alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
-                ws.cell(row, 2).font = Font(size=12)
-                ws.cell(row, 2).alignment = Alignment(horizontal="left", vertical="center")
+            tgl = d.get("Tanggal", "")
+            ws["B6"] = tgl
+            if isinstance(tgl, (datetime.datetime, datetime.date)):
+                ws["B6"].number_format = "dd-mm-yyyy"
+            for r in range(4, 7):
+                ws.cell(r, 1).font = Font(bold=True, size=12)
+                ws.cell(r, 1).alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+                ws.cell(r, 2).font = Font(size=12)
+                ws.cell(r, 2).alignment = Alignment(horizontal="left", vertical="center")
             ws.row_dimensions[4].height = 28
             ws.row_dimensions[5].height = 20
             ws.row_dimensions[6].height = 28
@@ -384,11 +409,12 @@ class PackingListEngine:
                 cell.border = bm
             ws.row_dimensions[9].height = 25
             r = 10
-            for it in d["Items"]:
+            for no_koli, it in enumerate(d["Items"], 1):
+                ws.cell(r, 1, no_koli)                      # NO KOLI terisi
                 ws.cell(r, 2, it["NamaBarang"])
                 ws.cell(r, 3, it["Qty"])
                 ws.cell(r, 4, it["Unit"])
-                ws.cell(r, 5, it.get("Notes", ""))   # ← NOTES DITULIS DI SINI
+                ws.cell(r, 5, it.get("Notes", ""))          # NOTES (BBT)
                 for c in range(1, 6):
                     cell = ws.cell(r, c)
                     cell.border = bt
